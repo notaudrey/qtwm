@@ -1,0 +1,10 @@
+#ifndef CONFIG_H
+#define CONFIG_H
+
+#define DEBUG 1
+
+#define BORDER_COLOR_UNFOCUSED 0xFF777777
+#define BORDER_COLOR_FOCUSED 0xFFABABAB
+#define BORDER_WIDTH 2
+
+#endif /* CONFIG_H */
