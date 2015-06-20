@@ -8,15 +8,25 @@
 #include "list.h"
 
 #ifdef DEBUG
-#define PDEBUG(Args...) \
-    fprintf(stderr, "qtwm: "); fprintf(stderr, ##Args);
+#define PDEBUG(...) \
+    fprintf(stderr, "qtwm: "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n");
 #else
 #define PDEBUG(Args...)
 #endif
 
+#define XCB_MOVE        XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y
+#define XCB_MOVE_RESIZE XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT
+#define XCB_RESIZE      XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT
+
 /*
- * Based off of https://github.com/rtyler/tinywm-ada/blob/master/tinywm-xcb.c
- * Uses some code from mcwm (http://hack.org/mc/hacks/mcwm/)
+ * Based off of tinywm-xcb:
+ * https://github.com/rtyler/tinywm-ada/blob/master/tinywm-xcb.c
+ *
+ * Uses some code from mcwm:
+ * http://hack.org/mc/hacks/mcwm/
+ *
+ * Also uses some code from monsterwm-xcb
+ * https://github.com/Cloudef/monsterwm-xcb/blob/master/monsterwm.c
  */
 
 /*
@@ -36,7 +46,6 @@ struct client_win {
     struct item* window_item;
 };
 
-
 /*
  * Globals
  */
@@ -52,21 +61,29 @@ struct item* winlist = NULL;
 
 xcb_screen_t* screen;
 
+/* Whether or not we need to re-tile all the windows */
+bool needs_tiling = false;
+
 /*
  * Forward declarations
  */
 
 void new_window(xcb_window_t window);
 struct client_win* setup_window(xcb_window_t window);
+void forgetwindow(xcb_window_t window);
 bool get_geom(xcb_drawable_t window, int16_t* x, int16_t* y, uint16_t* w, uint16_t* h);
-void move_window(xcb_drawable_t window, uint16_t x, uint16_t y);
+void move_window(xcb_drawable_t window, int16_t x, int16_t y);
+void get_next_position(xcb_drawable_t window, int16_t* x, int16_t* y);
+void configure_request(xcb_configure_request_event_t* e);
+struct client_win* find_client(xcb_drawable_t window);
+void tile(void);
 
 /**
  * Actual functions
  */
 
 int main(int argc, char** argv) {
-    // This is to do with window interaction?
+    // This is to do with window interaction
     uint32_t values[3];
 
     xcb_drawable_t win;
@@ -103,7 +120,14 @@ int main(int argc, char** argv) {
                     XCB_EVENT_MASK_BUTTON_RELEASE, XCB_GRAB_MODE_ASYNC,
                     XCB_GRAB_MODE_ASYNC, root, XCB_NONE, 3,
                     XCB_MOD_MASK_1);
-    // Flush the display
+    
+    // Do this to the root window so that new windows show up in XCB_CREATE_NOTIFY
+    uint32_t mask = 0;
+    uint32_t not_values[2];
+    mask = XCB_CW_EVENT_MASK;
+    not_values[0] = XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY;
+    xcb_change_window_attributes_checked(dpy, root, mask, not_values);
+    
     xcb_flush(dpy);
 
     // Main loop
@@ -154,7 +178,8 @@ int main(int argc, char** argv) {
                 values[1] = (pointer->root_y + geom->height > screen->height_in_pixels)?
                             (screen->height_in_pixels - geom->height):pointer->root_y;
                 // Do the movement
-                xcb_configure_window(dpy, win, XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, values);
+                //xcb_configure_window(dpy, win, XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, values);
+                move_window(win, values[0], values[1]);
                 xcb_flush(dpy);
             }
             // Window resizing
@@ -162,7 +187,7 @@ int main(int argc, char** argv) {
                 geom = xcb_get_geometry_reply(dpy, xcb_get_geometry(dpy, win), NULL);
                 values[0] = pointer->root_x - geom->x;
                 values[1] = pointer->root_y - geom->y;
-                xcb_configure_window(dpy, win, XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, values);
+                xcb_configure_window(dpy, win, XCB_RESIZE, values);
                 xcb_flush(dpy);
             }
         }
@@ -173,12 +198,38 @@ int main(int argc, char** argv) {
             xcb_ungrab_pointer(dpy, XCB_CURRENT_TIME);
             xcb_flush(dpy);
             break;
+        // Window wants to be mapped
         case XCB_MAP_REQUEST: {
             xcb_map_request_event_t *e;
 
             PDEBUG("event: Map request");
             e = (xcb_map_request_event_t*) ev;
             new_window(e->window);
+        }
+        break;
+        case XCB_CREATE_NOTIFY: {
+            xcb_create_notify_event_t *e;
+
+            PDEBUG("event: Create notify");
+            e = (xcb_create_notify_event_t*) ev;
+            new_window(e->window);
+        }
+        break;
+        case XCB_DESTROY_NOTIFY: {
+            PDEBUG("event: destroy notification");
+            xcb_destroy_notify_event_t *e;
+
+            e = (xcb_destroy_notify_event_t*) ev;
+
+            // Adjust window focus
+
+            // Forget about this windodw
+            forgetwindow(e->window);
+            xcb_flush(dpy);
+        }
+        break;
+        case XCB_CONFIGURE_REQUEST: {
+            configure_request((xcb_configure_request_event_t*) ev);
         }
         break;
         }
@@ -203,6 +254,12 @@ void new_window(xcb_window_t window) {
     // Determine if it needs to be remapped or not.
     // Set up borders/etc., add to list of managed windows
     // Position
+    int16_t x;
+    int16_t y;
+    PDEBUG("Acquiring position!");
+    get_next_position(client->id, &x, &y);
+    PDEBUG("Moving!");
+    move_window(client->id, x, y);
     // xcb_map_window(connection, id)
     xcb_map_window(dpy, client->id);
     // "Declare window normal"? Some ICCCM thing it looks like
@@ -236,7 +293,7 @@ struct client_win* setup_window(xcb_window_t window) {
     xcb_flush(dpy);
 
     // Remember window and store a few things about it
-    
+
     item = additem(&winlist);
 
     if(item == NULL) {
@@ -264,10 +321,27 @@ struct client_win* setup_window(xcb_window_t window) {
     if(!get_geom(window, &client->x, &client->y, &client->w, &client->h)) {
         PDEBUG("Couldn't get geometry for initial window setup!");
     }
-    
+
     // ICCCM nonsense would go here.
-    
+
     return client;
+}
+
+void forgetwindow(xcb_window_t window) {
+    struct item* item;
+    struct client_win* client;
+
+    for(item = winlist; item != NULL; item = item->next) {
+        client = item->data;
+        if(window == client->id) {
+            PDEBUG("Found client. Forgetting...");
+
+            // Workspaces (as needed)
+
+            free(item->data);
+            delitem(&winlist, item);
+        }
+    }
 }
 
 bool get_geom(xcb_drawable_t window, int16_t* x, int16_t* y, uint16_t* w, uint16_t* h) {
@@ -278,6 +352,7 @@ bool get_geom(xcb_drawable_t window, int16_t* x, int16_t* y, uint16_t* w, uint16
         PDEBUG("Unable to get window geometry!");
         return false;
     }
+    PDEBUG("Got geometry: %dx%d+%dx%d", geom->x, geom->y, geom->width, geom->height)
 
     *x = geom->x;
     *y = geom->y;
@@ -289,26 +364,87 @@ bool get_geom(xcb_drawable_t window, int16_t* x, int16_t* y, uint16_t* w, uint16
     return true;
 }
 
-void move_window(xcb_drawable_t window, uint16_t x, uint16_t y) {
-    uint32_t values[2];
+void move_window(xcb_drawable_t window, int16_t x, int16_t y) {
+    uint32_t values[2] = { x, y };
 
     if(window == screen->root || window == 0) {
         PDEBUG("Attempted to move root window!");
         return;
     }
-    
-    values[0] = x;
-    values[1] = y;
 
-    xcb_configure_window(dpy, window, XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, values);
+    PDEBUG("Moving window to (%d %d)", x, y);
+
+    xcb_configure_window(dpy, window, XCB_MOVE, values);
 
     xcb_flush(dpy);
 }
 
+void get_next_position(xcb_drawable_t win, int16_t* x, int16_t* y) {
+    int16_t tx = 0;
+    int16_t ty = 0;
+    struct item* window;
+    struct client_win* client;
 
+    for(window = winlist; window != NULL; window = window->next) {
+        client = window->data;
+        if(client->x > tx) {
+            tx = client->x + client->w;
+        }
+        if(client->y > ty) {
+            ty = client->y + client->h;
+        }
+    }
+    if(tx + client->w > screen->width_in_pixels - RIGHT_PADDING - client->w) {
+        tx = screen->width_in_pixels - client->w - RIGHT_PADDING;
+    }
+    if(tx < LEFT_PADDING) {
+        tx = LEFT_PADDING;
+    }
+    if(ty + client->h > screen->height_in_pixels - BOTTOM_PADDING) {
+        ty = screen->height_in_pixels - BOTTOM_PADDING - client->h;
+    }
+    if(ty < TOP_PADDING) {
+        ty = TOP_PADDING;
+    }
+    PDEBUG("Found position: (%d, %d)", tx, ty);
+    *x = tx;
+    *y = ty;
 
+}
 
+void configure_request(xcb_configure_request_event_t* e) {
+    struct client_win* client;
 
+    if((client = find_client(e->window))) {
+        // Configurations. Taken from looking at mcwm again.
+        //
+        // XCB_CONFIG_WINDOW_WIDTH
+        // XCB_CONFIG_WINDOW_HEIGHT
+        // XCB_CONFIG_WINDOW_SIBLING
+        // XCB_CONFIG_WINDOW_STACK_MODE
+    } else {
+        // Unmapped window
+        PDEBUG("X requested that we configure a window we don't know about yet!");
+    }
+}
+
+struct client_win* find_client(xcb_drawable_t window) {
+    struct client_win* win;
+    struct item* item;
+
+    for(item = winlist; item != NULL; item = item->next) {
+        win = item->data;
+        if(win->id == window) {
+            PDEBUG("Found client");
+            return win;
+        }
+    }
+
+    return NULL;
+}
+
+void tile(void) {
+}
 
 
 

@@ -7,4 +7,9 @@
 #define BORDER_COLOR_FOCUSED 0xFFABABAB
 #define BORDER_WIDTH 2
 
+#define LEFT_PADDING 4
+#define RIGHT_PADDING 4
+#define TOP_PADDING 24
+#define BOTTOM_PADDING 4
+
 #endif /* CONFIG_H */
