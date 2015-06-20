@@ -2,6 +2,6 @@
 qtwm
 
 # vim stuff
-*.swp
-*.sqp
-*~
+src/*.swp
+src/*.sqp
+src/*~
