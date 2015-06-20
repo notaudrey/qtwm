@@ -1,3 +1,7 @@
+/**
+ * Compliant to X11/ICCCM/EWMH specs? Who does that?
+ */
+
 #include <xcb/xcb.h>
 
 #include <stdbool.h>
@@ -59,8 +63,6 @@ xcb_screen_t* screen;
 /* List of current windows */
 struct item* winlist = NULL;
 
-xcb_screen_t* screen;
-
 /* Whether or not we need to re-tile all the windows */
 bool needs_tiling = false;
 
@@ -69,14 +71,19 @@ bool needs_tiling = false;
  */
 
 void new_window(xcb_window_t window);
+void set_border_color(xcb_window_t window, bool focus);
+void set_border_width(xcb_window_t window);
 struct client_win* setup_window(xcb_window_t window);
 void forgetwindow(xcb_window_t window);
 bool get_geom(xcb_drawable_t window, int16_t* x, int16_t* y, uint16_t* w, uint16_t* h);
 void move_window(xcb_drawable_t window, int16_t x, int16_t y);
+void resize_window(xcb_drawable_t window, uint16_t w, uint16_t h);
+void move_resize_window(xcb_drawable_t window, int16_t x, int16_t y, uint16_t w, uint16_t h);
 void get_next_position(xcb_drawable_t window, int16_t* x, int16_t* y);
 void configure_request(xcb_configure_request_event_t* e);
 struct client_win* find_client(xcb_drawable_t window);
 void tile(void);
+void stack(void);
 
 /**
  * Actual functions
@@ -109,25 +116,27 @@ int main(int argc, char** argv) {
     // Get the root window of the screen
     root = screen->root;
 
-    // Grab stuff. Some key press, and mouse clicks
-    xcb_grab_key(dpy, 1, root, XCB_MOD_MASK_2, XCB_NO_SYMBOL,
-                 XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+    // Grab modifiers
+    /*xcb_grab_key(dpy, 1, root, MODIFIER_MASK, XCB_NO_SYMBOL,
+                 XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);*/
+    // Grab move button
     xcb_grab_button(dpy, 0, root, XCB_EVENT_MASK_BUTTON_PRESS |
                     XCB_EVENT_MASK_BUTTON_RELEASE, XCB_GRAB_MODE_ASYNC,
-                    XCB_GRAB_MODE_ASYNC, root, XCB_NONE, 1,
-                    XCB_MOD_MASK_1);
+                    XCB_GRAB_MODE_ASYNC, root, XCB_NONE, MOVE_MOUSE_BUTTON,
+                    MODIFIER_MASK);
+    // Grab resize button
     xcb_grab_button(dpy, 0, root, XCB_EVENT_MASK_BUTTON_PRESS |
                     XCB_EVENT_MASK_BUTTON_RELEASE, XCB_GRAB_MODE_ASYNC,
-                    XCB_GRAB_MODE_ASYNC, root, XCB_NONE, 3,
-                    XCB_MOD_MASK_1);
-    
+                    XCB_GRAB_MODE_ASYNC, root, XCB_NONE, RESIZE_MOUSE_BUTTON,
+                    MODIFIER_MASK);
+
     // Do this to the root window so that new windows show up in XCB_CREATE_NOTIFY
     uint32_t mask = 0;
     uint32_t not_values[2];
     mask = XCB_CW_EVENT_MASK;
     not_values[0] = XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY;
     xcb_change_window_attributes_checked(dpy, root, mask, not_values);
-    
+
     xcb_flush(dpy);
 
     // Main loop
@@ -232,6 +241,18 @@ int main(int argc, char** argv) {
             configure_request((xcb_configure_request_event_t*) ev);
         }
         break;
+        case XCB_FOCUS_IN:
+        case XCB_FOCUS_OUT: {
+            int32_t response_type = ev->response_type & ~0x80;
+            if(response_type == XCB_FOCUS_IN) {
+                xcb_focus_in_event_t* e = (xcb_focus_in_event_t*) ev;
+                set_border_color(e->event, true);
+            } else {
+                xcb_focus_out_event_t* e = (xcb_focus_out_event_t*) ev;
+                set_border_color(e->event, false);
+            }
+        }
+        break;
         }
     }
 
@@ -266,6 +287,7 @@ void new_window(xcb_window_t window) {
     // Move pointer as necessary
     // xcb_flush(conn);
     xcb_flush(dpy);
+    needs_tiling = true;
 }
 
 struct client_win* setup_window(xcb_window_t window) {
@@ -275,13 +297,15 @@ struct client_win* setup_window(xcb_window_t window) {
     struct client_win* client;
 
     // Set border color
-    values[0] = BORDER_COLOR_UNFOCUSED;
-    xcb_change_window_attributes(dpy, window, XCB_CW_BORDER_PIXEL, values);
+    //values[0] = BORDER_COLOR_UNFOCUSED;
+    //xcb_change_window_attributes(dpy, window, XCB_CW_BORDER_PIXEL, values);
+    set_border_color(window, false);
+    set_border_width(window);
 
     // Set border width
-    values[0] = BORDER_WIDTH;
+    /*values[0] = BORDER_WIDTH;
     mask = XCB_CONFIG_WINDOW_BORDER_WIDTH;
-    xcb_change_window_attributes(dpy, window, mask, values);
+    xcb_change_window_attributes(dpy, window, mask, values);*/
 
     mask = XCB_CW_EVENT_MASK;
     values[0] = XCB_EVENT_MASK_ENTER_WINDOW;
@@ -327,6 +351,18 @@ struct client_win* setup_window(xcb_window_t window) {
     return client;
 }
 
+void set_border_color(xcb_window_t window, bool focus) {
+    uint32_t values[2];
+    values[0] = focus ? BORDER_COLOR_FOCUSED : BORDER_COLOR_UNFOCUSED;
+    xcb_change_window_attributes(dpy, window, XCB_CW_BORDER_PIXEL, values);
+}
+
+void set_border_width(xcb_window_t window) {
+    uint32_t values[2];
+    values[0] = BORDER_WIDTH;
+    xcb_change_window_attributes(dpy, window, XCB_CONFIG_WINDOW_BORDER_WIDTH, values);
+}
+
 void forgetwindow(xcb_window_t window) {
     struct item* item;
     struct client_win* client;
@@ -342,6 +378,7 @@ void forgetwindow(xcb_window_t window) {
             delitem(&winlist, item);
         }
     }
+    needs_tiling = true;
 }
 
 bool get_geom(xcb_drawable_t window, int16_t* x, int16_t* y, uint16_t* w, uint16_t* h) {
@@ -366,16 +403,22 @@ bool get_geom(xcb_drawable_t window, int16_t* x, int16_t* y, uint16_t* w, uint16
 
 void move_window(xcb_drawable_t window, int16_t x, int16_t y) {
     uint32_t values[2] = { x, y };
-
-    if(window == screen->root || window == 0) {
-        PDEBUG("Attempted to move root window!");
-        return;
-    }
-
     PDEBUG("Moving window to (%d %d)", x, y);
-
     xcb_configure_window(dpy, window, XCB_MOVE, values);
+    xcb_flush(dpy);
+}
 
+void resize_window(xcb_drawable_t window, uint16_t w, uint16_t h) {
+    uint32_t values[2] = { w, h };
+    PDEBUG("Resizing window to (%d, %d)!", w, h);
+    xcb_configure_window(dpy, window, XCB_RESIZE, values);
+    xcb_flush(dpy);
+}
+
+void move_resize_window(xcb_drawable_t window, int16_t x, int16_t y, uint16_t w, uint16_t h) {
+    uint32_t values[4] = { x, y, w, h };
+    PDEBUG("Changing geometry to %dx%d+%dx%d!", x, y, w, h);
+    xcb_configure_window(dpy, window, XCB_MOVE_RESIZE, values);
     xcb_flush(dpy);
 }
 
@@ -416,6 +459,8 @@ void configure_request(xcb_configure_request_event_t* e) {
     struct client_win* client;
 
     if((client = find_client(e->window))) {
+        PDEBUG("X asked us to configure a window. We should implement that at some point.");
+        PDEBUG("configure_request: Not implemented");
         // Configurations. Taken from looking at mcwm again.
         //
         // XCB_CONFIG_WINDOW_WIDTH
@@ -444,11 +489,76 @@ struct client_win* find_client(xcb_drawable_t window) {
 }
 
 void tile(void) {
+    if(!needs_tiling) {
+        return;
+    }
+
+    PDEBUG("Tiling needed, working on it...");
+
+    struct item* item;
+    struct client_win* window;
+    uint16_t wc = 0;
+
+    // Count windows. Why am I doing this, again?
+    for(item = winlist; item != NULL; item = item->next) {
+        ++wc;
+    }
+
+    // Do the magic
+    stack();
+
+    // Done!
+    needs_tiling = false;
 }
 
+// TODO Come up with a better name
+void stack(void) {
+    struct client_win* window = NULL;
+    struct item* item = NULL;
+    // Max width
+    uint16_t mw = screen->width_in_pixels - LEFT_PADDING - RIGHT_PADDING;
+    // Max height
+    uint16_t mh = screen->height_in_pixels - TOP_PADDING - BOTTOM_PADDING;
+    uint16_t x = LEFT_PADDING;
+    uint16_t y = TOP_PADDING;
+    uint16_t w = mw;
+    uint16_t h = mh;
+    uint16_t wincount = 0;
+
+    uint16_t maxrows = 4;
+    uint16_t maxcols = 4;
+    // Row count
+    uint16_t rc = 1;
+    // Column count
+    uint16_t cc = 1;
+    // Column width
+    uint16_t colw = 0;
+    // Row height
+    uint16_t rowh = 0;
+
+    for(item = winlist; item != NULL; item = item->next) {
+        ++wincount;
+    }
+    if(!wincount) {
+        return;
+    } else {
+        if(wincount == 1) {
+            window = winlist->data;
+            move_resize_window(window->id, x, y, mw, mh);
+            return;
+        } else {
+            if(wincount > maxrows * maxcols) {
+                fprintf(stderr, "Too many windows present, bailing out! (%d exceeded maximum count of %d)", wincount, maxrows * maxcols);
+                return;
+            }
+        }
+    }
+
+    for(item = winlist; item != NULL; item = item->next) {
 
 
-
-
-
+        window = item->data;
+        move_resize_window(window->id, x, y, w, h);
+    }
+}
 
