@@ -1,6 +1,6 @@
 CC = clang
 TARGET = qtwm
-CFLAGS = -pipe -Wall  -lxcb -lxcb-xinerama
+CFLAGS = -pipe -Wall  -lxcb -lxcb-xinerama -lxcb-ewmh
 
 all: $(TARGET)
 
