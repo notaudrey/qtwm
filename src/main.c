@@ -8,6 +8,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <xcb/xinerama.h>
+
 #include "config.h"
 #include "list.h"
 
@@ -31,6 +33,12 @@
  *
  * Also uses some code from monsterwm-xcb
  * https://github.com/Cloudef/monsterwm-xcb/blob/master/monsterwm.c
+ *
+ * As well as some bspwm
+ * https://github.com/baskerville/bspwm/blob/master/bspwm.c
+ *
+ * And some dwm
+ * http://git.suckless.org/dwm/tree/dwm.c
  */
 
 /*
@@ -63,9 +71,6 @@ xcb_screen_t* screen;
 /* List of current windows */
 struct item* winlist = NULL;
 
-/* Whether or not we need to re-tile all the windows */
-bool needs_tiling = false;
-
 /*
  * Forward declarations
  */
@@ -79,11 +84,8 @@ bool get_geom(xcb_drawable_t window, int16_t* x, int16_t* y, uint16_t* w, uint16
 void move_window(xcb_drawable_t window, int16_t x, int16_t y);
 void resize_window(xcb_drawable_t window, uint16_t w, uint16_t h);
 void move_resize_window(xcb_drawable_t window, int16_t x, int16_t y, uint16_t w, uint16_t h);
-void get_next_position(xcb_drawable_t window, int16_t* x, int16_t* y);
 void configure_request(xcb_configure_request_event_t* e);
 struct client_win* find_client(xcb_drawable_t window);
-void tile(void);
-void stack(void);
 
 /**
  * Actual functions
@@ -98,9 +100,18 @@ int main(int argc, char** argv) {
     xcb_drawable_t root;
 
     // X event(s)
-    xcb_generic_event_t *ev;
+    xcb_generic_event_t* ev;
     // ???
-    xcb_get_geometry_reply_t *geom;
+    xcb_get_geometry_reply_t* geom;
+    // For making moving easier
+    xcb_button_press_event_t* bstart;
+    int16_t x = 0, y = 0;
+    uint16_t w = 0, h = 0;
+
+    // For events
+    uint32_t mask = 0;
+    uint32_t not_values[2];
+
 
     // Connect to the display
     dpy = xcb_connect(NULL, NULL);
@@ -115,6 +126,34 @@ int main(int argc, char** argv) {
     screen = xcb_setup_roots_iterator(xcb_get_setup(dpy)).data;
     // Get the root window of the screen
     root = screen->root;
+
+    // Xinerama, for multihead
+#ifdef MULTIHEAD
+    bool xinerama_is_active = false;
+    if(xcb_get_extension_data(dpy, &xcb_xinerama_id)->present) {
+        // Xinerama might actually be there
+        xcb_xinerama_is_active_reply_t* xia = xcb_xinerama_is_active_reply(dpy, xcb_xinerama_is_active(dpy), NULL);
+        if(xia) {
+            xinerama_is_active = xia->state;
+            free(xia);
+        }
+    }
+    if(xinerama_is_active) {
+        // Multihead?
+        xcb_xinerama_query_screens_reply_t* xsq = xcb_xinerama_query_screens_reply(dpy, xcb_xinerama_query_screens(dpy), NULL);
+        xcb_xinerama_screen_info_t* xsi = xcb_xinerama_query_screens_screen_info(xsq);
+        int32_t n = xcb_xinerama_query_screens_screen_info_length(xsq);
+        for(int32_t i = 0; i < n; i++) {
+            xcb_xinerama_screen_info_t info = xsi[i];
+            xcb_rectangle_t rect = (xcb_rectangle_t) { info.x_org, info.y_org, info.width, info.height };
+            // Add monitor
+            PDEBUG("%dx%d+%dx%d", rect.x, rect.y, rect.width, rect.height);
+        }
+        free(xsq);
+    } else {
+        PDEBUG("Warning: Xinerama is inactive.");
+    }
+#endif
 
     // Grab modifiers
     /*xcb_grab_key(dpy, 1, root, MODIFIER_MASK, XCB_NO_SYMBOL,
@@ -131,8 +170,6 @@ int main(int argc, char** argv) {
                     MODIFIER_MASK);
 
     // Do this to the root window so that new windows show up in XCB_CREATE_NOTIFY
-    uint32_t mask = 0;
-    uint32_t not_values[2];
     mask = XCB_CW_EVENT_MASK;
     not_values[0] = XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY;
     xcb_change_window_attributes_checked(dpy, root, mask, not_values);
@@ -172,6 +209,8 @@ int main(int argc, char** argv) {
                              XCB_EVENT_MASK_BUTTON_MOTION | XCB_EVENT_MASK_POINTER_MOTION_HINT,
                              XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC, root, XCB_NONE, XCB_CURRENT_TIME);
             // Flush
+            bstart = e;
+            get_geom(win, &x, &y, &w, &h);
             xcb_flush(dpy);
         }
         break;
@@ -182,13 +221,9 @@ int main(int argc, char** argv) {
             // Window movement
             if(values[2] == 1) {
                 geom = xcb_get_geometry_reply(dpy, xcb_get_geometry(dpy, win), NULL);
-                values[0] = (pointer->root_x + geom->width > screen->width_in_pixels) ?
-                            (screen->width_in_pixels - geom->width) : pointer->root_x;
-                values[1] = (pointer->root_y + geom->height > screen->height_in_pixels)?
-                            (screen->height_in_pixels - geom->height):pointer->root_y;
-                // Do the movement
-                //xcb_configure_window(dpy, win, XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, values);
-                move_window(win, values[0], values[1]);
+                int32_t xdiff = pointer->root_x - bstart->root_x;
+                int32_t ydiff = pointer->root_y - bstart->root_y;
+                move_window(win, bstart->root_x + xdiff, bstart->root_y + ydiff);
                 xcb_flush(dpy);
             }
             // Window resizing
@@ -247,13 +282,16 @@ int main(int argc, char** argv) {
             if(response_type == XCB_FOCUS_IN) {
                 xcb_focus_in_event_t* e = (xcb_focus_in_event_t*) ev;
                 set_border_color(e->event, true);
+                PDEBUG("Focusing on a window!");
             } else {
                 xcb_focus_out_event_t* e = (xcb_focus_out_event_t*) ev;
                 set_border_color(e->event, false);
+                PDEBUG("Unfocusing on a window!");
             }
         }
         break;
         }
+        free(ev);
     }
 
     return 0;
@@ -274,20 +312,12 @@ void new_window(xcb_window_t window) {
 
     // Determine if it needs to be remapped or not.
     // Set up borders/etc., add to list of managed windows
-    // Position
-    int16_t x;
-    int16_t y;
-    PDEBUG("Acquiring position!");
-    get_next_position(client->id, &x, &y);
-    PDEBUG("Moving!");
-    move_window(client->id, x, y);
     // xcb_map_window(connection, id)
     xcb_map_window(dpy, client->id);
     // "Declare window normal"? Some ICCCM thing it looks like
     // Move pointer as necessary
     // xcb_flush(conn);
     xcb_flush(dpy);
-    needs_tiling = true;
 }
 
 struct client_win* setup_window(xcb_window_t window) {
@@ -297,15 +327,8 @@ struct client_win* setup_window(xcb_window_t window) {
     struct client_win* client;
 
     // Set border color
-    //values[0] = BORDER_COLOR_UNFOCUSED;
-    //xcb_change_window_attributes(dpy, window, XCB_CW_BORDER_PIXEL, values);
     set_border_color(window, false);
     set_border_width(window);
-
-    // Set border width
-    /*values[0] = BORDER_WIDTH;
-    mask = XCB_CONFIG_WINDOW_BORDER_WIDTH;
-    xcb_change_window_attributes(dpy, window, mask, values);*/
 
     mask = XCB_CW_EVENT_MASK;
     values[0] = XCB_EVENT_MASK_ENTER_WINDOW;
@@ -352,13 +375,13 @@ struct client_win* setup_window(xcb_window_t window) {
 }
 
 void set_border_color(xcb_window_t window, bool focus) {
-    uint32_t values[2];
+    uint32_t values[1];
     values[0] = focus ? BORDER_COLOR_FOCUSED : BORDER_COLOR_UNFOCUSED;
     xcb_change_window_attributes(dpy, window, XCB_CW_BORDER_PIXEL, values);
 }
 
 void set_border_width(xcb_window_t window) {
-    uint32_t values[2];
+    uint32_t values[1];
     values[0] = BORDER_WIDTH;
     xcb_change_window_attributes(dpy, window, XCB_CONFIG_WINDOW_BORDER_WIDTH, values);
 }
@@ -378,7 +401,6 @@ void forgetwindow(xcb_window_t window) {
             delitem(&winlist, item);
         }
     }
-    needs_tiling = true;
 }
 
 bool get_geom(xcb_drawable_t window, int16_t* x, int16_t* y, uint16_t* w, uint16_t* h) {
@@ -422,39 +444,6 @@ void move_resize_window(xcb_drawable_t window, int16_t x, int16_t y, uint16_t w,
     xcb_flush(dpy);
 }
 
-void get_next_position(xcb_drawable_t win, int16_t* x, int16_t* y) {
-    int16_t tx = 0;
-    int16_t ty = 0;
-    struct item* window;
-    struct client_win* client;
-
-    for(window = winlist; window != NULL; window = window->next) {
-        client = window->data;
-        if(client->x > tx) {
-            tx = client->x + client->w;
-        }
-        if(client->y > ty) {
-            ty = client->y + client->h;
-        }
-    }
-    if(tx + client->w > screen->width_in_pixels - RIGHT_PADDING - client->w) {
-        tx = screen->width_in_pixels - client->w - RIGHT_PADDING;
-    }
-    if(tx < LEFT_PADDING) {
-        tx = LEFT_PADDING;
-    }
-    if(ty + client->h > screen->height_in_pixels - BOTTOM_PADDING) {
-        ty = screen->height_in_pixels - BOTTOM_PADDING - client->h;
-    }
-    if(ty < TOP_PADDING) {
-        ty = TOP_PADDING;
-    }
-    PDEBUG("Found position: (%d, %d)", tx, ty);
-    *x = tx;
-    *y = ty;
-
-}
-
 void configure_request(xcb_configure_request_event_t* e) {
     struct client_win* client;
 
@@ -486,79 +475,5 @@ struct client_win* find_client(xcb_drawable_t window) {
     }
 
     return NULL;
-}
-
-void tile(void) {
-    if(!needs_tiling) {
-        return;
-    }
-
-    PDEBUG("Tiling needed, working on it...");
-
-    struct item* item;
-    struct client_win* window;
-    uint16_t wc = 0;
-
-    // Count windows. Why am I doing this, again?
-    for(item = winlist; item != NULL; item = item->next) {
-        ++wc;
-    }
-
-    // Do the magic
-    stack();
-
-    // Done!
-    needs_tiling = false;
-}
-
-// TODO Come up with a better name
-void stack(void) {
-    struct client_win* window = NULL;
-    struct item* item = NULL;
-    // Max width
-    uint16_t mw = screen->width_in_pixels - LEFT_PADDING - RIGHT_PADDING;
-    // Max height
-    uint16_t mh = screen->height_in_pixels - TOP_PADDING - BOTTOM_PADDING;
-    uint16_t x = LEFT_PADDING;
-    uint16_t y = TOP_PADDING;
-    uint16_t w = mw;
-    uint16_t h = mh;
-    uint16_t wincount = 0;
-
-    uint16_t maxrows = 4;
-    uint16_t maxcols = 4;
-    // Row count
-    uint16_t rc = 1;
-    // Column count
-    uint16_t cc = 1;
-    // Column width
-    uint16_t colw = 0;
-    // Row height
-    uint16_t rowh = 0;
-
-    for(item = winlist; item != NULL; item = item->next) {
-        ++wincount;
-    }
-    if(!wincount) {
-        return;
-    } else {
-        if(wincount == 1) {
-            window = winlist->data;
-            move_resize_window(window->id, x, y, mw, mh);
-            return;
-        } else {
-            if(wincount > maxrows * maxcols) {
-                fprintf(stderr, "Too many windows present, bailing out! (%d exceeded maximum count of %d)", wincount, maxrows * maxcols);
-                return;
-            }
-        }
-    }
-
-    for(item = winlist; item != NULL; item = item->next) {
-
-
-        window = item->data;
-        move_resize_window(window->id, x, y, w, h);
-    }
 }
 

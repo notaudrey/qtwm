@@ -3,9 +3,10 @@
 
 #include <xcb/xproto.h>
 
-#define DEBUG 1
+#define DEBUG
+#define MULTIHEAD
 
-#define MODIFIER_MASK XCB_MOD_MASK_1
+#define MODIFIER_MASK XCB_MOD_MASK_1 | XCB_MOD_MASK_SHIFT
 #define MOVE_MOUSE_BUTTON 1
 #define RESIZE_MOUSE_BUTTON 3
 
