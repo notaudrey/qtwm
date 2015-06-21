@@ -106,7 +106,6 @@ int main(int argc, char** argv) {
     uint16_t w = 0, h = 0;
 
     // For events
-    uint32_t mask = 0;
     uint32_t not_values[2];
 
 
@@ -145,7 +144,7 @@ int main(int argc, char** argv) {
             xcb_rectangle_t rect = (xcb_rectangle_t) {
                 info.x_org, info.y_org, info.width, info.height
             };
-            // Add monitor
+            // Add monitor or something
             PDEBUG("%dx%d+%dx%d", rect.x, rect.y, rect.width, rect.height);
         }
         free(xsq);
@@ -168,10 +167,17 @@ int main(int argc, char** argv) {
                     XCB_GRAB_MODE_ASYNC, root, XCB_NONE, RESIZE_MOUSE_BUTTON,
                     MODIFIER_MASK);
 
-    // Do this to the root window so that new windows show up in XCB_CREATE_NOTIFY
-    mask = XCB_CW_EVENT_MASK;
-    not_values[0] = XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY;
-    xcb_change_window_attributes_checked(dpy, root, mask, not_values);
+    // Do this to the root window so that new windows show up in 
+    // XCB_CREATE_NOTIFY, as well as focus events working etc.
+    not_values[0] = XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY 
+        | XCB_EVENT_MASK_EXPOSURE
+        | XCB_EVENT_MASK_BUTTON_PRESS
+        | XCB_EVENT_MASK_KEY_PRESS
+        | XCB_EVENT_MASK_ENTER_WINDOW
+        | XCB_EVENT_MASK_LEAVE_WINDOW
+        | XCB_EVENT_MASK_FOCUS_CHANGE
+        | XCB_EVENT_MASK_PROPERTY_CHANGE;
+    xcb_change_window_attributes_checked(dpy, root, XCB_CW_EVENT_MASK, not_values);
 
     xcb_flush(dpy);
 
@@ -218,20 +224,23 @@ int main(int argc, char** argv) {
             xcb_query_pointer_reply_t *pointer;
             pointer = xcb_query_pointer_reply(dpy, xcb_query_pointer(dpy, root), 0);
             // Window movement
-            if(values[2] == 1) {
-                geom = xcb_get_geometry_reply(dpy, xcb_get_geometry(dpy, win), NULL);
+            if(values[2] == MOVE_MOUSE_BUTTON) {
                 int32_t xdiff = pointer->root_x - bstart->root_x;
                 int32_t ydiff = pointer->root_y - bstart->root_y;
                 move_window(win, bstart->root_x + xdiff, bstart->root_y + ydiff);
                 xcb_flush(dpy);
             }
             // Window resizing
-            else if(values[2] == 3) {
+            else if(values[2] == RESIZE_MOUSE_BUTTON) {
                 geom = xcb_get_geometry_reply(dpy, xcb_get_geometry(dpy, win), NULL);
-                values[0] = pointer->root_x - geom->x;
-                values[1] = pointer->root_y - geom->y;
-                xcb_configure_window(dpy, win, XCB_RESIZE, values);
-                xcb_flush(dpy);
+                if(!(pointer->root_x <= geom->x || pointer->root_y <= geom->y)) {
+                    values[0] = pointer->root_x - geom->x;
+                    values[1] = pointer->root_y - geom->y;
+                    if(values[0] >= MIN_WINDOW_SIZE && values[1] >= MIN_WINDOW_SIZE) {
+                        resize_window(win, values[0], values[1]);
+                    }
+                    xcb_flush(dpy);
+                }
             }
         }
         break;
@@ -276,6 +285,12 @@ int main(int argc, char** argv) {
         case XCB_FOCUS_IN:
         case XCB_FOCUS_OUT: {
             int32_t response_type = ev->response_type & ~0x80;
+
+            PDEBUG("NOTICE ME SENPAI!!!");
+            PDEBUG("NOTICE ME SENPAI!!!");
+            PDEBUG("NOTICE ME SENPAI!!!");
+            PDEBUG("NOTICE ME SENPAI!!!");
+            PDEBUG("NOTICE ME SENPAI!!!");
 
             if(response_type == XCB_FOCUS_IN) {
                 xcb_focus_in_event_t* e = (xcb_focus_in_event_t*) ev;
@@ -328,7 +343,9 @@ struct client_win* setup_window(xcb_window_t window) {
     set_border_width(window);
 
     mask = XCB_CW_EVENT_MASK;
-    values[0] = XCB_EVENT_MASK_ENTER_WINDOW;
+    values[0] = XCB_EVENT_MASK_ENTER_WINDOW 
+        | XCB_EVENT_MASK_FOCUS_CHANGE 
+        | XCB_EVENT_MASK_LEAVE_WINDOW;
     xcb_change_window_attributes(dpy, window, mask, values);
 
     // Add this window to the X Save Set
@@ -380,7 +397,7 @@ void set_border_color(xcb_window_t window, bool focus) {
 void set_border_width(xcb_window_t window) {
     uint32_t values[1];
     values[0] = BORDER_WIDTH;
-    xcb_change_window_attributes(dpy, window, XCB_CONFIG_WINDOW_BORDER_WIDTH, values);
+    xcb_configure_window(dpy, window, XCB_CONFIG_WINDOW_BORDER_WIDTH, values);
 }
 
 void forgetwindow(xcb_window_t window) {
