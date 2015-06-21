@@ -9,8 +9,6 @@
 
 #include <xcb/xcb.h>
 #include <xcb/xcb_atom.h>
-/* Okay, so it turns out that the specs actually do matter. ^_^'' */
-#include <xcb/xcb_ewmh.h>
 #include <xcb/xinerama.h>
 
 #include "config.h"
@@ -71,12 +69,6 @@ xcb_screen_t* screen;
 /* List of current windows */
 struct item* winlist = NULL;
 
-/* That pesky dock atom thing */
-char* dock_atom = "_NET_WM_WINDOW_TYPE_DOCK";
-
-/* Damn you specs */
-xcb_ewmh_connection_t* ewmh;
-
 /*
  * Forward declarations
  */
@@ -126,13 +118,6 @@ int main(int argc, char** argv) {
         fprintf(stderr, "Error connecting to X display!");
         return 1;
     }
-
-    if(!(ewmh = calloc(1, sizeof(xcb_ewmh_connection_t)))) {
-        fprintf(stderr, "Not able to make the ewmh connection!");
-        return 1;
-    }
-    xcb_intern_atom_cookie_t* cookie = xcb_ewmh_init_atoms(dpy, ewmh);
-    xcb_ewmh_init_atoms_replies(ewmh, cookie, (void*)0);
 
     // ???(get_information_about_display(display)).???;
     screen = xcb_setup_roots_iterator(xcb_get_setup(dpy)).data;
@@ -186,6 +171,9 @@ int main(int argc, char** argv) {
     // Do this to the root window so that new windows show up in
     // XCB_CREATE_NOTIFY, as well as focus events working etc.
     not_values[0] = XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY
+                    | XCB_EVENT_MASK_EXPOSURE
+                    | XCB_EVENT_MASK_BUTTON_PRESS
+                    | XCB_EVENT_MASK_KEY_PRESS
                     | XCB_EVENT_MASK_ENTER_WINDOW
                     | XCB_EVENT_MASK_LEAVE_WINDOW
                     | XCB_EVENT_MASK_FOCUS_CHANGE
@@ -207,6 +195,7 @@ int main(int argc, char** argv) {
             xcb_button_press_event_t *e;
             // Typecast obv.
             e = (xcb_button_press_event_t*) ev;
+
             // Get clicked window
             win = e->child;
             // Stacking
@@ -300,19 +289,22 @@ int main(int argc, char** argv) {
             if(response_type == XCB_ENTER_NOTIFY) {
                 xcb_enter_notify_event_t* e = (xcb_enter_notify_event_t*) ev;
                 set_border_color(e->event, true);
-                xcb_flush(dpy);
                 PDEBUG("Focusing on a window!");
             } else if(response_type == XCB_LEAVE_NOTIFY) {
                 xcb_leave_notify_event_t* e = (xcb_leave_notify_event_t*) ev;
                 set_border_color(e->event, false);
-                xcb_flush(dpy);
                 PDEBUG("Unfocusing on a window!");
             }
         }
         break;
         }
         free(ev);
+        if(xcb_connection_has_error(dpy)) {
+            fprintf(stderr, "XCB connection has encountered an error, exiting...");
+            break;
+        }
     }
+    xcb_disconnect(dpy);
     return 0;
 }
 
@@ -326,29 +318,18 @@ void new_window(xcb_window_t window) {
         return;
     }
 
-    xcb_atom_t xcb_dock_atom;
-    xcb_intern_atom_cookie_t cookie = xcb_intern_atom(dpy, 0, strlen(dock_atom), dock_atom);
-    xcb_intern_atom_reply_t* reply = xcb_intern_atom_reply(dpy, cookie, NULL);
-    if(reply) {
-        xcb_dock_atom = reply->atom;
-        if(xcb_dock_atom == ewmh->_NET_WM_WINDOW_TYPE_DOCK) {
-            PDEBUG("No need to do stuff to a dock!");
-        }
-        free(reply);
-        xcb_map_window(dpy, window);
-    } else {
-        client = setup_window(window);
-        if(client == NULL) {
-            PDEBUG("Couldn't set up window: Out of memory!");
-            return;
-        }
-        // Determine if it needs to be remapped or not.
-        // Set up borders/etc., add to list of managed windows
-        // xcb_map_window(connection, id)
-        xcb_map_window(dpy, client->id);
-        // "Declare window normal"? Some ICCCM thing it looks like
-        // Move pointer as necessary
+    client = setup_window(window);
+    if(client == NULL) {
+        PDEBUG("Couldn't set up window: Out of memory!");
+        return;
     }
+    // Determine if it needs to be remapped or not.
+    // Set up borders/etc., add to list of managed windows
+    // xcb_map_window(connection, id)
+    xcb_map_window(dpy, client->id);
+    // "Declare window normal"? Some ICCCM thing it looks like
+    // Move pointer as necessary
+
     // xcb_flush(conn);
     xcb_flush(dpy);
 }
@@ -414,12 +395,14 @@ void set_border_color(xcb_window_t window, bool focus) {
     uint32_t values[1];
     values[0] = focus ? BORDER_COLOR_FOCUSED : BORDER_COLOR_UNFOCUSED;
     xcb_change_window_attributes(dpy, window, XCB_CW_BORDER_PIXEL, values);
+    xcb_flush(dpy);
 }
 
 void set_border_width(xcb_window_t window) {
     uint32_t values[1];
     values[0] = BORDER_WIDTH;
     xcb_configure_window(dpy, window, XCB_CONFIG_WINDOW_BORDER_WIDTH, values);
+    xcb_flush(dpy);
 }
 
 void forgetwindow(xcb_window_t window) {
