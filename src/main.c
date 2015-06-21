@@ -36,9 +36,6 @@
  *
  * As well as some bspwm
  * https://github.com/baskerville/bspwm/blob/master/bspwm.c
- *
- * And some dwm
- * http://git.suckless.org/dwm/tree/dwm.c
  */
 
 /*
@@ -145,7 +142,9 @@ int main(int argc, char** argv) {
         int32_t n = xcb_xinerama_query_screens_screen_info_length(xsq);
         for(int32_t i = 0; i < n; i++) {
             xcb_xinerama_screen_info_t info = xsi[i];
-            xcb_rectangle_t rect = (xcb_rectangle_t) { info.x_org, info.y_org, info.width, info.height };
+            xcb_rectangle_t rect = (xcb_rectangle_t) {
+                info.x_org, info.y_org, info.width, info.height
+            };
             // Add monitor
             PDEBUG("%dx%d+%dx%d", rect.x, rect.y, rect.width, rect.height);
         }
@@ -264,9 +263,7 @@ int main(int argc, char** argv) {
             xcb_destroy_notify_event_t *e;
 
             e = (xcb_destroy_notify_event_t*) ev;
-
-            // Adjust window focus
-
+            // Adjust window focus maybe?
             // Forget about this windodw
             forgetwindow(e->window);
             xcb_flush(dpy);
@@ -279,6 +276,7 @@ int main(int argc, char** argv) {
         case XCB_FOCUS_IN:
         case XCB_FOCUS_OUT: {
             int32_t response_type = ev->response_type & ~0x80;
+
             if(response_type == XCB_FOCUS_IN) {
                 xcb_focus_in_event_t* e = (xcb_focus_in_event_t*) ev;
                 set_border_color(e->event, true);
@@ -293,7 +291,6 @@ int main(int argc, char** argv) {
         }
         free(ev);
     }
-
     return 0;
 }
 
